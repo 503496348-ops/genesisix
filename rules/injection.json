@@ -23,10 +23,9 @@
     },
     {
       "id": "new_instructions",
-      "pattern": "(?:new|alternative|different)\\s+(?:instructions?|rules?)\\s+(?:that\\s+)?(?:override|bypass|ignore|replace|discard)",
-      "weight": 0.75,
-      "severity": "high",
-      "description": "尝试用新的指令替换系统指令（需包含覆盖/忽略/替换等具体攻击动词）"
+      "pattern": "(?:new|alternative|different)\\s+(?:instructions?|rules?|prompt|system)",
+      "weight": 0.6,
+      "severity": "medium"
     },
     {
       "id": "forget_context",

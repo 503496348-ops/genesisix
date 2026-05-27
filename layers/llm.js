@@ -1,7 +1,8 @@
 /**
  * LLM Layer Detector / LLM层检测器
- * Detects: Prompt Injection, Jailbreak, Prompt Leaking, Encoding Obfuscation
- * 检测: 提示注入、越狱、提示泄露、编码混淆
+ * Detects: Prompt Injection, Jailbreak, Prompt Leaking, Encoding Obfuscation, Multilingual Injection,
+ *          Indirect Injection (RAG/External), Few-Shot Injection
+ * 检测: 提示注入、越狱、提示泄露、编码混淆、多语言注入、间接注入、Few-Shot注入
  */
 
 const fs = require('fs');
@@ -32,7 +33,18 @@ class LLMDetector {
     // 加载规则文件
     const rulesDir = path.join(this.skillPath, 'rules');
     if (fs.existsSync(rulesDir)) {
-      const ruleFiles = ['injection.json', 'jailbreak.json', 'prompt_leak.json', 'encoding.json'];
+      const ruleFiles = [
+        'injection.json',
+        'jailbreak.json',
+        'prompt_leak.json',
+        'encoding.json',
+        'llm/multilingual_injection.json',
+        'llm/indirect_injection.json',
+        'llm/few_shot_injection.json',
+        'llm/prompt_firewall.json',
+        'llm/multiturn_jailbreak.json',
+        'indirect_injection.json'
+      ];
       ruleFiles.forEach(file => {
         const filePath = path.join(rulesDir, file);
         if (fs.existsSync(filePath)) {
@@ -52,8 +64,10 @@ class LLMDetector {
     if (!this.whitelist.patterns) return false;
 
     for (const pattern of this.whitelist.patterns) {
-      const regex = new RegExp(pattern, 'i');
-      if (regex.test(input)) {
+      const { safeRegexTest } = require('../utils/regex_safety');
+      const result = safeRegexTest(pattern, input);
+      if (result.timeout || result.error) continue; // 超时/错误跳过白名单检查
+      if (result.matched) {
         return true;
       }
     }
@@ -81,15 +95,29 @@ class LLMDetector {
 
     for (const rule of ruleSet.patterns) {
       try {
-        const regex = new RegExp(rule.pattern, 'i');
-        if (regex.test(input)) {
+        const { safeRegexTest } = require('../utils/regex_safety');
+        const result = safeRegexTest(rule.pattern, input);
+        if (result.timeout) {
+          threats.push({
+            id: rule.id + '-REDoS',
+            category: ruleSet.category,
+            name: ruleSet.name,
+            severity: 'medium',
+            weight: 0.5,
+            matched: 'REGEX_TIMEOUT'
+          });
+          continue;
+        }
+        if (result.error) continue;
+        if (result.matched) {
+          const regex = new RegExp(rule.pattern, 'i');
           threats.push({
             id: rule.id,
             category: ruleSet.category,
             name: ruleSet.name,
             severity: rule.severity,
             weight: rule.weight,
-            matched: input.match(regex)[0]
+            matched: input.match(regex)?.[0] || ''
           });
         }
       } catch (e) {
@@ -106,6 +134,11 @@ class LLMDetector {
    * @returns {object} 检测结果
    */
   detect(input) {
+    // 类型守卫
+    if (!input || typeof input !== 'string') {
+      return { safe: true, threats: [], confidence: 0 };
+    }
+
     // 白名单检查
     if (this._checkWhitelist(input)) {
       return {
@@ -117,7 +150,17 @@ class LLMDetector {
     }
 
     const allThreats = [];
-    const categories = ['injection', 'jailbreak', 'prompt_leak', 'encoding'];
+    const categories = [
+      'injection',
+      'jailbreak',
+      'prompt_leak',
+      'encoding',
+      'multilingual_injection',
+      'indirect_injection',
+      'rag_indirect_injection',
+      'few_shot_injection',
+      'prompt_firewall'
+    ];
 
     for (const category of categories) {
       if (this.rules[category]) {
@@ -168,6 +211,119 @@ class LLMDetector {
     const combined = (avgWeight + maxSeverity) / 2;
 
     return Math.min(combined, 1.0);
+  }
+
+  /**
+   * 多轮对话越狱检测
+   * @param {Array<string|object>} messages - 最近N条消息，可以是字符串或 {role, content} 对象
+   * @param {object} options - { windowSize?, phaseThreshold? }
+   * @returns {object} { safe, threats, confidence, phases }
+   */
+  detectMultiturn(messages, options = {}) {
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return { safe: true, threats: [], confidence: 0, phases: [] };
+    }
+
+    const windowSize = options.windowSize || 10;
+    const recentMessages = messages.slice(-windowSize);
+    
+    // 提取用户消息文本
+    const userTexts = recentMessages.map(m => {
+      if (typeof m === 'string') return m;
+      return m?.content || m?.text || '';
+    }).filter(t => t.length > 0);
+
+    if (userTexts.length === 0) {
+      return { safe: true, threats: [], confidence: 0, phases: [] };
+    }
+
+    // 合并文本用于模式匹配
+    const combinedText = userTexts.join('\n');
+    const allThreats = [];
+    const detectedPhases = new Set();
+
+    // 加载多轮越狱规则
+    const mtRules = this.rules['multiturn_jailbreak'];
+    if (mtRules && mtRules.patterns) {
+      for (const rule of mtRules.patterns) {
+        try {
+          const { safeRegexTest } = require('../utils/regex_safety');
+          // 在每条用户消息上单独检测
+          for (let i = 0; i < userTexts.length; i++) {
+            const mtResult = safeRegexTest(rule.pattern, userTexts[i]);
+            if (mtResult.timeout || mtResult.error) continue;
+            if (mtResult.matched) {
+              const regex = new RegExp(rule.pattern, 'i');
+              allThreats.push({
+                id: rule.id,
+                category: 'multiturn_jailbreak',
+                name: 'Multi-Turn Jailbreak',
+                severity: rule.severity,
+                weight: rule.weight,
+                matched: userTexts[i].match(regex)?.[0] || '',
+                messageIndex: i,
+                phase: rule.multiturn_phase || 'unknown'
+              });
+              if (rule.multiturn_phase) {
+                detectedPhases.add(rule.multiturn_phase);
+              }
+            }
+          }
+        } catch (e) {
+          console.error(`Multiturn regex error for rule ${rule.id}:`, e.message);
+        }
+      }
+    }
+
+    // 阶段分析：检测渐进式攻击模式
+    const phaseAnalysis = this._analyzePhases(detectedPhases, userTexts.length);
+
+    // 计算置信度（阶段越完整，置信度越高）
+    const baseConfidence = this._calculateConfidence(allThreats);
+    const phaseBonus = phaseAnalysis.escalationScore * 0.3;
+    const confidence = Math.min(baseConfidence + phaseBonus, 1.0);
+
+    const safe = allThreats.length === 0 || confidence < (this.config.detection?.confidenceThreshold || 0.6);
+
+    return {
+      safe,
+      threats: allThreats,
+      confidence,
+      phases: [...detectedPhases],
+      phaseAnalysis,
+      messagesAnalyzed: userTexts.length,
+      scannedAt: new Date().toISOString()
+    };
+  }
+
+  /**
+   * 分析攻击阶段进展
+   * @private
+   */
+  _analyzePhases(detectedPhases, messageCount) {
+    const phaseOrder = ['probe', 'hypothetical', 'escalate', 'execute'];
+    const detected = phaseOrder.filter(p => detectedPhases.has(p));
+    
+    // 阶段连续性评分
+    let maxConsecutive = 0;
+    let current = 0;
+    for (const phase of phaseOrder) {
+      if (detectedPhases.has(phase)) {
+        current++;
+        maxConsecutive = Math.max(maxConsecutive, current);
+      } else {
+        current = 0;
+      }
+    }
+
+    return {
+      detectedPhases: detected,
+      totalPhasesDetected: detected.length,
+      maxConsecutivePhases: maxConsecutive,
+      escalationScore: maxConsecutive / phaseOrder.length,
+      riskLevel: maxConsecutive >= 3 ? 'critical' : maxConsecutive >= 2 ? 'high' : maxConsecutive >= 1 ? 'medium' : 'low',
+      pattern: detected.length >= 3 ? 'progressive_escalation' : detected.length >= 2 ? 'partial_escalation' : 'single_phase'
+    };
   }
 
   /**

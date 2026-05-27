@@ -1,5 +1,5 @@
 ---
-name: clawsafe-input-hook
+name: 奇点造物-Genesisix-input-hook
 description: "Intercepts all user input and blocks malicious content before it reaches the AI agent"
 homepage: https://github.com/openclaw/奇点造物-Genesisix
 metadata:

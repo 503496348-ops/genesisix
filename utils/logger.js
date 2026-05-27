@@ -10,7 +10,7 @@ const path = require('path');
 class Logger {
   constructor(options = {}) {
     this.logDir = options.logDir || path.join(process.cwd(), 'logs');
-    this.logFile = options.logFile || 'clawsafe.log';
+    this.logFile = options.logFile || '奇点造物-Genesisix.log';
     this.maxSize = options.maxSize || 10 * 1024 * 1024; // 10MB
     this.levels = {
       debug: 0,
@@ -71,7 +71,7 @@ class Logger {
   _rotateLog() {
     const filePath = this._getFullPath();
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const archivePath = path.join(this.logDir, `clawsafe-${timestamp}.log`);
+    const archivePath = path.join(this.logDir, `奇点造物-Genesisix-${timestamp}.log`);
     
     try {
       fs.renameSync(filePath, archivePath);

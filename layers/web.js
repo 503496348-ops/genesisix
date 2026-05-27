@@ -18,7 +18,7 @@ class WebDetector {
     const rulesDir = path.join(this.skillPath, 'rules', 'web');
     if (!fs.existsSync(rulesDir)) return;
 
-    const ruleFiles = ['sql_injection.json', 'xss.json', 'csrf.json', 'ssrf.json'];
+    const ruleFiles = ['sql_injection.json', 'xss.json', 'csrf.json', 'ssrf.json', 'command_injection.json', 'path_traversal.json', 'ssti.json', 'xxe.json'];
     
     ruleFiles.forEach(file => {
       const filePath = path.join(rulesDir, file);
@@ -48,7 +48,11 @@ class WebDetector {
       this._detectSQLInjection(input),
       this._detectXSS(input),
       this._detectCSRF(input),
-      this._detectSSRF(input)
+      this._detectSSRF(input),
+      this._detectCommandInjection(input),
+      this._detectPathTraversal(input),
+      this._detectSSTI(input),
+      this._detectXXE(input)
     ];
 
     results.forEach(result => {
@@ -81,17 +85,38 @@ class WebDetector {
     return this._matchRules(input, this.rules.ssrf, 'ssrf');
   }
 
+  _detectCommandInjection(input) {
+    return this._matchRules(input, this.rules.command_injection, 'command_injection');
+  }
+
+  _detectPathTraversal(input) {
+    return this._matchRules(input, this.rules.path_traversal, 'path_traversal');
+  }
+
+  _detectSSTI(input) {
+    return this._matchRules(input, this.rules.ssti, 'ssti');
+  }
+
+  _detectXXE(input) {
+    return this._matchRules(input, this.rules.xxe, 'xxe');
+  }
+
   _matchRules(input, ruleSet, type) {
     if (!ruleSet || !ruleSet.patterns) {
       return { threats: [], confidence: 0 };
     }
 
+    const { safeRegexTestGlobal } = require('../utils/regex_safety');
     const threats = [];
-    
+
     for (const pattern of ruleSet.patterns) {
-      try {
-        const regex = new RegExp(pattern.pattern, 'gi');
-        if (regex.test(input)) {
+      const result = safeRegexTestGlobal(pattern.pattern, input);
+      if (result.timeout) {
+        threats.push({ type, id: pattern.id + '-REDoS', severity: 'medium', description: '正则超时跳过: ' + pattern.id, confidence: 0.5, pattern: pattern.pattern });
+        continue;
+      }
+      if (result.error) continue;
+      if (result.matched) {
           threats.push({
             type,
             id: pattern.id,
@@ -102,9 +127,7 @@ class WebDetector {
             pattern: pattern.pattern
           });
         }
-      } catch (e) {
-        // 正则错误，跳过
-      }
+
     }
 
     const confidence = threats.length > 0 

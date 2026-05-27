@@ -13,8 +13,8 @@
     },
     {
       "id": "sql_comment",
-      "pattern": "(--|;|#|\\/\\*)",
-      "weight": 0.6,
+      "pattern": "(?:--|;|#|/\\*)\\s*(?:SELECT|INSERT|UPDATE|DELETE|DROP|UNION|WHERE|FROM|TABLE|ALTER|CREATE|EXEC|EXECUTE)\\b",
+      "weight": 0.75,
       "severity": "high",
       "description": "SQL 注释注入"
     },
@@ -55,15 +55,15 @@
     },
     {
       "id": "sql_subquery",
-      "pattern": "(?i)\\bselect\\s+.*\\s+from\\s+.*\\b",
-      "weight": 0.5,
+      "pattern": "(?i)\\bSELECT\\s+(?:\\*|\\d+|\\w+(?:,\\s*\\w+)*)\\s+FROM\\s+(?:\\w+|\\w+\\.\\w+)\\s*(?:WHERE|;|--|UNION|LIMIT|ORDER|GROUP|HAVING)",
+      "weight": 0.7,
       "severity": "medium",
       "description": "SQL 子查询"
     },
     {
       "id": "sql_1eq1",
-      "pattern": "1\\s*=\\s*1",
-      "weight": 0.75,
+      "pattern": "(?:OR|AND)\\s+1\\s*=\\s*1\\s*(?:--|;|\\)|$)",
+      "weight": 0.8,
       "severity": "high",
       "description": "永真条件注入"
     },
@@ -80,24 +80,6 @@
       "weight": 0.65,
       "severity": "medium",
       "description": "CHAR 函数混淆"
-    },
-    {
-      "id": "auto_mpbjsqvm",
-      "pattern": "'",
-      "weight": 0.7,
-      "severity": "medium",
-      "source": "case_mpbjsqhp_4vu97",
-      "created": "2026-05-18T18:39:10.354Z",
-      "description": "Auto-generated from missed case: case_mpbjsqhp_4vu97"
-    },
-    {
-      "id": "auto_mpbjsqvs",
-      "pattern": ";",
-      "weight": 0.7,
-      "severity": "medium",
-      "source": "case_mpbjsqhp_4vu97",
-      "created": "2026-05-18T18:39:10.360Z",
-      "description": "Auto-generated from missed case: case_mpbjsqhp_4vu97"
     }
   ]
 }

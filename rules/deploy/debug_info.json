@@ -6,8 +6,8 @@
   "patterns": [
     {
       "id": "console_debug",
-      "pattern": "(?:console\\.(?:debug|log|info)|print_r|var_dump|print_r)\\(",
-      "weight": 0.5,
+      "pattern": "console\\.(?:debug|log|info)\\([^)]*(?:password|secret|token|key|credential|auth|session|cookie|request|response|body|header)[^)]*\\)",
+      "weight": 0.6,
       "severity": "medium",
       "description": "调试输出"
     },

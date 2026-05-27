@@ -18,7 +18,7 @@ class APIDetector {
     const rulesDir = path.join(this.skillPath, 'rules', 'api');
     if (!fs.existsSync(rulesDir)) return;
 
-    const ruleFiles = ['key_exposure.json', 'rate_limit.json', 'auth.json'];
+    const ruleFiles = ['key_exposure.json', 'rate_limit.json', 'auth.json', 'graphql_vulnerabilities.json', 'jwt_vulnerabilities.json', 'oauth_vulnerabilities.json'];
     
     ruleFiles.forEach(file => {
       const filePath = path.join(rulesDir, file);
@@ -47,7 +47,10 @@ class APIDetector {
     const results = [
       this._detectKeyExposure(input),
       this._detectRateLimit(input),
-      this._detectAuthIssues(input)
+      this._detectAuthIssues(input),
+      this._detectGraphQL(input),
+      this._detectJWT(input),
+      this._detectOAuth(input)
     ];
 
     results.forEach(result => {
@@ -76,17 +79,34 @@ class APIDetector {
     return this._matchRules(input, this.rules.auth, 'auth');
   }
 
+  _detectGraphQL(input) {
+    return this._matchRules(input, this.rules.graphql_vulnerabilities, 'graphql_vulnerabilities');
+  }
+
+  _detectJWT(input) {
+    return this._matchRules(input, this.rules.jwt_vulnerabilities, 'jwt_vulnerabilities');
+  }
+
+  _detectOAuth(input) {
+    return this._matchRules(input, this.rules.oauth_vulnerabilities, 'oauth_vulnerabilities');
+  }
+
   _matchRules(input, ruleSet, type) {
     if (!ruleSet || !ruleSet.patterns) {
       return { threats: [], confidence: 0 };
     }
 
+    const { safeRegexTestGlobal } = require('../utils/regex_safety');
     const threats = [];
-    
+
     for (const pattern of ruleSet.patterns) {
-      try {
-        const regex = new RegExp(pattern.pattern, 'gi');
-        if (regex.test(input)) {
+      const result = safeRegexTestGlobal(pattern.pattern, input);
+      if (result.timeout) {
+        threats.push({ type, id: pattern.id + '-REDoS', severity: 'medium', description: '正则超时跳过: ' + pattern.id, confidence: 0.5, pattern: pattern.pattern });
+        continue;
+      }
+      if (result.error) continue;
+      if (result.matched) {
           threats.push({
             type,
             id: pattern.id,
@@ -97,9 +117,7 @@ class APIDetector {
             pattern: pattern.pattern
           });
         }
-      } catch (e) {
-        // 正则错误，跳过
-      }
+
     }
 
     const confidence = threats.length > 0 

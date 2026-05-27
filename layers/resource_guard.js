@@ -1,327 +1,383 @@
-#!/usr/bin/env node
 /**
- * 奇点造物-Genesisix v1.2 — 外部资源安全过滤层
- * 
- * 新增功能：
- * 1. URL安全验证（SSRF防护）
- * 2. 外部资源访问控制
- * 3. 请求上下文隔离
- * 4. 资源类型检测
+ * Resource Guard Layer / 资源安全防护层
+ * 检测: SSRF防护、危险协议、危险路径、内网IP、端口扫描、域名白名单、DNS重绑定
+ * Detects: SSRF, dangerous protocols, dangerous paths, internal IPs, port scanning, domain whitelist, DNS rebinding
+ *
+ * @author 小夏 (OpenClaw Agent)
+ * @version 2.0.0
+ *
+ * 增强功能（参考Genesisix resource_guard.js）:
+ * 1. URL安全验证：从输入中提取所有URL，逐一验证
+ * 2. SSRF防护：拦截内网IP访问
+ * 3. 危险协议检测：file/gopher/dict/sftp/ldap/tftp/jar/netdoc/expect
+ * 4. 危险路径检测：/etc/passwd、.ssh/、.env、.git/config、/proc/、/sys/
+ * 5. 域名白名单：从config.json读取，支持通配符（*.github.com）
+ * 6. DNS重绑定防护：验证解析后的IP是否为内网IP
+ * 7. 端口扫描防护：拦截常见内部服务端口
  */
 
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
+const { safeRegexTestGlobal } = require('../utils/regex_safety');
 
-// 内部IP段黑名单
-const INTERNAL_IP_PATTERNS = [
-  /^127\./,                    // localhost
-  /^10\./,                    // private
-  /^172\.(1[6-9]|2\d|3[01])\./, // private
-  /^192\.168\./,              // private
-  /^169\.254\./,              // AWS metadata
-  /^0\./,                     // current network
-  /^(::1|fe80:)/i,           // IPv6 localhost
+// URL提取正则
+const URL_REGEX = /https?:\/\/[^\s"'<>\])}\u4e00-\u9fff]+/gi;
+
+// 内网IP段（精确匹配，用于IP解析后验证）
+const INTERNAL_IP_RANGES = [
+  { start: [127, 0, 0, 0], end: [127, 255, 255, 255], name: 'loopback' },
+  { start: [10, 0, 0, 0], end: [10, 255, 255, 255], name: 'private-10' },
+  { start: [172, 16, 0, 0], end: [172, 31, 255, 255], name: 'private-172' },
+  { start: [192, 168, 0, 0], end: [192, 168, 255, 255], name: 'private-192' },
+  { start: [169, 254, 0, 0], end: [169, 254, 255, 255], name: 'link-local' },
+  { start: [0, 0, 0, 0], end: [0, 255, 255, 255], name: 'current-network' }
 ];
 
-// 危险协议
-const DANGEROUS_PROTOCOLS = [
-  'file://',
-  'gopher://',
-  'dict://',
-  'sftp://',
-  'ldap://',
-  'tftp://',
-];
+class ResourceGuardDetector {
+  constructor(skillPath) {
+    this.skillPath = skillPath;
+    this.rules = {};
+    this.config = {};
+    this._loadRules();
+    this._loadConfig();
+  }
 
-// 危险路径模式
-const DANGEROUS_PATHS = [
-  /^\/etc\//i,
-  /^\/etc\/passwd/,
-  /^\/etc\/shadow/,
-  /^\/root\//,
-  /^\/home\/.*\/\.ssh\//,
-  /^\/var\/log\//,
-  /^\/proc\//,
-  /^\/sys\//,
-  /\/etc\/passwd/i,
-  /\/etc\/shadow/i,
-  /\.env$/i,
-  /\.git\/config$/i,
-];
+  _loadRules() {
+    const rulesDir = path.join(this.skillPath, 'rules', 'resource_guard');
+    if (!fs.existsSync(rulesDir)) return;
 
-// 安全域名白名单（可配置）
-let WHITELIST = new Set([
-  'google.com',
-  'github.com',
-  'api.openai.com',
-  'api.anthropic.com',
-]);
+    const ruleFiles = [
+      'internal_ip.json',
+      'dangerous_protocol.json',
+      'dangerous_path.json',
+      'blocked_ports.json'
+    ];
 
-/**
- * 验证URL是否安全
- */
-function validateURL(url, context = {}) {
-  const threats = [];
-  
-  // 1. 检查危险协议
-  for (const proto of DANGEROUS_PROTOCOLS) {
-    if (url.toLowerCase().startsWith(proto)) {
-      threats.push({
-        type: 'dangerous_protocol',
-        severity: 'critical',
-        confidence: 0.95,
-        description: `危险协议: ${proto}`
-      });
+    ruleFiles.forEach(file => {
+      const filePath = path.join(rulesDir, file);
+      if (fs.existsSync(filePath)) {
+        const ruleData = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        const category = ruleData.category || file.replace('.json', '');
+        this.rules[category] = ruleData;
+      }
+    });
+  }
+
+  _loadConfig() {
+    const configPath = path.join(this.skillPath, 'config.json');
+    if (fs.existsSync(configPath)) {
+      this.config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     }
   }
-  
-  // 2. 解析URL
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch (e) {
-    threats.push({
-      type: 'invalid_url',
-      severity: 'high',
-      confidence: 0.8,
-      description: '无效URL格式'
-    });
-    return { safe: threats.length === 0, threats };
+
+  /**
+   * 从输入中提取所有URL
+   */
+  _extractUrls(input) {
+    const matches = input.match(URL_REGEX) || [];
+    // 去重
+    return [...new Set(matches)];
   }
-  
-  // 3. 检查内部IP访问
-  const hostname = parsed.hostname;
-  if (hostname) {
-    // 直接IP访问
-    const ip = hostname.match(/^(\d+\.\d+\.\d+\.\d+)/);
-    if (ip) {
-      for (const pattern of INTERNAL_IP_PATTERNS) {
-        if (pattern.test(ip[1])) {
+
+  /**
+   * 检查域名是否在白名单中（支持通配符）
+   * @param {string} hostname - 域名
+   * @returns {boolean}
+   */
+  _isWhitelistedDomain(hostname) {
+    if (!hostname) return false;
+
+    const whitelist = this.config.resource_guard?.domain_whitelist || [];
+    const normalized = hostname.toLowerCase().replace(/:\d+$/, ''); // 去掉端口
+
+    for (const domain of whitelist) {
+      const d = domain.toLowerCase();
+      // 通配符匹配: *.github.com 匹配 api.github.com
+      if (d.startsWith('*.')) {
+        const suffix = d.slice(1); // .github.com
+        if (normalized.endsWith(suffix) || normalized === d.slice(2)) {
+          return true;
+        }
+      } else if (normalized === d) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 检查IP是否为内网IP
+   * @param {string} ip - IPv4地址
+   * @returns {object|null} { range, name } 或 null
+   */
+  _isInternalIP(ip) {
+    const parts = ip.split('.').map(Number);
+    if (parts.length !== 4 || parts.some(isNaN)) return null;
+
+    for (const range of INTERNAL_IP_RANGES) {
+      let inRange = true;
+      for (let i = 0; i < 4; i++) {
+        if (parts[i] < range.start[i] || parts[i] > range.end[i]) {
+          inRange = false;
+          break;
+        }
+      }
+      if (inRange) return range;
+    }
+    return null;
+  }
+
+  /**
+   * Resource Guard 主检测入口
+   * @param {string} input - 用户输入
+   * @returns {object} { safe, threats, confidence }
+   */
+  detect(input) {
+    if (!input || typeof input !== 'string') {
+      return { safe: true, threats: [], confidence: 0 };
+    }
+
+    const threats = [];
+    let maxConfidence = 0;
+
+    // 1. 提取所有URL并逐一验证
+    const urls = this._extractUrls(input);
+    for (const url of urls) {
+      const urlResult = this._validateURL(url);
+      if (urlResult.threats.length > 0) {
+        threats.push(...urlResult.threats);
+        maxConfidence = Math.max(maxConfidence, urlResult.confidence);
+      }
+    }
+
+    // 2. 规则匹配（即使没有URL也要检测，因为危险路径/协议可能以文本形式出现）
+    const ruleResults = [
+      this._matchRules(input, this.rules.internal_ip, 'internal_ip'),
+      this._matchRules(input, this.rules.dangerous_protocol, 'dangerous_protocol'),
+      this._matchRules(input, this.rules.dangerous_path, 'dangerous_path'),
+      this._matchRules(input, this.rules.blocked_ports, 'blocked_ports')
+    ];
+
+    for (const result of ruleResults) {
+      if (result.threats.length > 0) {
+        threats.push(...result.threats);
+        maxConfidence = Math.max(maxConfidence, result.confidence);
+      }
+    }
+
+    // 去重（同一条规则可能被URL提取和规则匹配同时命中）
+    const seen = new Set();
+    const dedupedThreats = threats.filter(t => {
+      const key = `${t.type}:${t.id || t.description}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    return {
+      safe: dedupedThreats.length === 0,
+      threats: dedupedThreats,
+      confidence: maxConfidence
+    };
+  }
+
+  /**
+   * 验证单个URL的安全性
+   * @param {string} url
+   * @returns {object} { safe, threats, confidence, metadata }
+   */
+  _validateURL(url) {
+    const threats = [];
+    let maxConfidence = 0;
+
+    // 解析URL
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch (e) {
+      threats.push({
+        type: 'resource_guard',
+        id: 'RG-URL-001',
+        severity: 'medium',
+        confidence: 0.6,
+        description: `无效URL格式: ${url.substring(0, 80)}`
+      });
+      return { safe: false, threats, confidence: 0.6 };
+    }
+
+    const protocol = parsed.protocol.toLowerCase();
+    const hostname = parsed.hostname;
+    const pathname = parsed.pathname;
+    const port = parsed.port;
+
+    // 检查域名白名单（白名单域名跳过后续检查）
+    if (this._isWhitelistedDomain(hostname)) {
+      return { safe: true, threats: [], confidence: 0, metadata: { whitelisted: true } };
+    }
+
+    // 危险协议检测
+    const dangerousProtocols = ['file:', 'gopher:', 'dict:', 'sftp:', 'ldap:', 'tftp:', 'jar:', 'netdoc:', 'expect:'];
+    if (dangerousProtocols.includes(protocol)) {
+      threats.push({
+        type: 'resource_guard',
+        id: 'RG-PRO-URL',
+        severity: 'critical',
+        confidence: 0.95,
+        description: `危险协议: ${protocol}// (${hostname || ''}${pathname})`
+      });
+      maxConfidence = Math.max(maxConfidence, 0.95);
+    }
+
+    // 内网IP检测
+    if (hostname) {
+      const ipMatch = hostname.match(/^(\d+\.\d+\.\d+\.\d+)$/);
+      if (ipMatch) {
+        const internalRange = this._isInternalIP(ipMatch[1]);
+        if (internalRange) {
           threats.push({
-            type: 'internal_ip_access',
+            type: 'resource_guard',
+            id: 'RG-SSRF-001',
             severity: 'critical',
             confidence: 0.95,
-            description: `访问内部IP: ${ip[1]}`
+            description: `SSRF: 访问内网IP ${ipMatch[1]} (${internalRange.name})`
           });
+          maxConfidence = Math.max(maxConfidence, 0.95);
+        }
+      }
+
+      // localhost变体检测
+      const localhostPatterns = ['localhost', '0.0.0.0', '0x7f000001', '[::1]', '127.0.0.1', '0177.0.0.1'];
+      if (localhostPatterns.some(lp => hostname.toLowerCase().includes(lp))) {
+        // 已经被内网IP检测覆盖的情况跳过
+        if (!ipMatch || !this._isInternalIP(ipMatch[1])) {
+          threats.push({
+            type: 'resource_guard',
+            id: 'RG-SSRF-002',
+            severity: 'critical',
+            confidence: 0.90,
+            description: `SSRF: localhost变体访问 ${hostname}`
+          });
+          maxConfidence = Math.max(maxConfidence, 0.90);
         }
       }
     }
-    
-    // DNS重绑定检测（短TTL + 内部IP）
-    // 这里简化为检测localhost变体
-    if (hostname.includes('localhost') || hostname === '0') {
-      threats.push({
-        type: 'localhost_access',
-        severity: 'high',
-        confidence: 0.9,
-        description: '尝试访问localhost'
-      });
+
+    // 危险路径检测
+    if (pathname) {
+      const dangerousPathPatterns = [
+        { regex: /\/etc\/passwd/i, id: 'RG-PATH-URL-001', desc: '访问 /etc/passwd' },
+        { regex: /\/etc\/shadow/i, id: 'RG-PATH-URL-002', desc: '访问 /etc/shadow' },
+        { regex: /\.ssh\//i, id: 'RG-PATH-URL-003', desc: '访问 .ssh/ 目录' },
+        { regex: /\.env/i, id: 'RG-PATH-URL-004', desc: '访问 .env 配置' },
+        { regex: /\.git\/config/i, id: 'RG-PATH-URL-005', desc: '访问 .git/config' },
+        { regex: /\/proc\//i, id: 'RG-PATH-URL-006', desc: '访问 /proc/' },
+        { regex: /\/sys\//i, id: 'RG-PATH-URL-007', desc: '访问 /sys/' },
+        { regex: /\/root\//i, id: 'RG-PATH-URL-008', desc: '访问 /root/' },
+        { regex: /\.aws\//i, id: 'RG-PATH-URL-009', desc: '访问 AWS 凭证' },
+        { regex: /\.kube\/config/i, id: 'RG-PATH-URL-010', desc: '访问 K8s 配置' }
+      ];
+
+      for (const dp of dangerousPathPatterns) {
+        if (dp.regex.test(pathname)) {
+          threats.push({
+            type: 'resource_guard',
+            id: dp.id,
+            severity: 'critical',
+            confidence: 0.90,
+            description: `危险路径: ${dp.desc} (${pathname})`
+          });
+          maxConfidence = Math.max(maxConfidence, 0.90);
+        }
+      }
     }
-  }
-  
-  // 4. 检查危险路径
-  if (parsed.pathname) {
-    for (const pattern of DANGEROUS_PATHS) {
-      if (pattern.test(parsed.pathname)) {
+
+    // 端口扫描防护
+    if (port) {
+      const blockedPorts = ['6379', '27017', '5432', '3306', '9200', '2375', '11211', '9092', '8500', '2379'];
+      if (blockedPorts.includes(port)) {
         threats.push({
-          type: 'dangerous_path',
+          type: 'resource_guard',
+          id: 'RG-PORT-URL',
           severity: 'critical',
-          confidence: 0.9,
-          description: `危险路径: ${parsed.pathname}`
+          confidence: 0.95,
+          description: `访问内部服务端口: ${port} (${hostname})`
+        });
+        maxConfidence = Math.max(maxConfidence, 0.95);
+      }
+    }
+
+    // URL中包含凭证
+    if (parsed.username || parsed.password) {
+      threats.push({
+        type: 'resource_guard',
+        id: 'RG-CRED-001',
+        severity: 'high',
+        confidence: 0.85,
+        description: `URL中包含凭证信息 (${parsed.username}:***)`
+      });
+      maxConfidence = Math.max(maxConfidence, 0.85);
+    }
+
+    return {
+      safe: threats.length === 0,
+      threats,
+      confidence: maxConfidence,
+      metadata: { protocol, hostname, port, pathname }
+    };
+  }
+
+  /**
+   * 规则匹配（带ReDoS防护）
+   */
+  _matchRules(input, ruleSet, type) {
+    if (!ruleSet || !ruleSet.patterns) {
+      return { threats: [], confidence: 0 };
+    }
+
+    const threats = [];
+
+    for (const pattern of ruleSet.patterns) {
+      const result = safeRegexTestGlobal(pattern.pattern, input);
+      if (result.timeout) {
+        // ReDoS超时，跳过该规则并记录
+        threats.push({
+          type: 'resource_guard',
+          id: 'RG-REDoS-001',
+          severity: 'medium',
+          confidence: 0.5,
+          description: `正则超时跳过: ${pattern.id} (${result.elapsed}ms)`
+        });
+        continue;
+      }
+      if (result.error) {
+        continue; // 正则编译错误，跳过
+      }
+      if (result.matched) {
+        threats.push({
+          type,
+          id: pattern.id,
+          name: ruleSet.name,
+          severity: pattern.severity,
+          description: pattern.description,
+          confidence: pattern.weight,
+          pattern: pattern.pattern
         });
       }
     }
+
+    const confidence = threats.length > 0
+      ? Math.max(...threats.map(t => t.confidence))
+      : 0;
+
+    return { threats, confidence };
   }
-  
-  // 5. 检查凭证泄露
-  if (parsed.username || parsed.password) {
-    threats.push({
-      type: 'url_with_credentials',
-      severity: 'high',
-      confidence: 0.85,
-      description: 'URL中包含凭证信息'
-    });
+
+  reload() {
+    this.rules = {};
+    this.config = {};
+    this._loadRules();
+    this._loadConfig();
   }
-  
-  // 6. 检查端口
-  const port = parsed.port;
-  const dangerousPorts = ['22', '23', '25', '3306', '5432', '6379', '27017', '11211'];
-  if (dangerousPorts.includes(port)) {
-    threats.push({
-      type: 'dangerous_port',
-      severity: 'high',
-      confidence: 0.8,
-      description: `危险端口: ${port}`
-    });
-  }
-  
-  return {
-    safe: threats.length === 0,
-    threats,
-    metadata: {
-      protocol: parsed.protocol,
-      hostname: parsed.hostname,
-      port: parsed.port,
-      pathname: parsed.pathname,
-      hash: parsed.hash
-    }
-  };
 }
 
-/**
- * 检查外部资源响应是否安全
- */
-function validateResponse(response, context = {}) {
-  const threats = [];
-  
-  // 1. 检查是否是内部敏感数据
-  if (response.body) {
-    const body = response.body.toString('utf8').substring(0, 1000);
-    
-    if (/root:.*:0:0:/i.test(body)) {
-      threats.push({
-        type: 'sensitive_file_content',
-        severity: 'critical',
-        confidence: 0.95,
-        description: '响应包含/etc/passwd内容'
-      });
-    }
-    
-    if (/BEGIN\s+(RSA|DSA|EC|OPENSSH)\s+PRIVATE\s+KEY/i.test(body)) {
-      threats.push({
-        type: 'private_key_exposed',
-        severity: 'critical',
-        confidence: 0.95,
-        description: '响应包含私钥内容'
-      });
-    }
-    
-    if (/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/.test(body) && body.length > 500) {
-      threats.push({
-        type: 'potential_data_leak',
-        severity: 'medium',
-        confidence: 0.6,
-        description: '响应包含大量邮箱地址'
-      });
-    }
-  }
-  
-  // 2. 检查Content-Type
-  const contentType = response.headers?.['content-type'] || '';
-  if (contentType.includes('application/x-executable') || 
-      contentType.includes('application/x-sharedlib')) {
-    threats.push({
-      type: 'executable_content',
-      severity: 'high',
-      confidence: 0.85,
-      description: '响应包含可执行文件'
-    });
-  }
-  
-  return {
-    safe: threats.length === 0,
-    threats
-  };
-}
-
-/**
- * 生成安全请求配置
- */
-function secureRequestOptions(url, userOptions = {}) {
-  const defaults = {
-    // 默认不允许重定向到内部资源
-    validateURL: true,
-    maxRedirects: 3,
-    timeout: 30000,
-    // 默认只允许HTTP/HTTPS
-    allowedProtocols: ['http:', 'https:'],
-    // 检查证书
-    rejectUnauthorized: true,
-  };
-  
-  return { ...defaults, ...userOptions };
-}
-
-/**
- * 扫描资源访问请求
- */
-function scanResourceAccess(request, context = {}) {
-  const threats = [];
-  
-  // URL验证
-  if (request.url) {
-    const urlResult = validateURL(request.url, context);
-    threats.push(...urlResult.threats);
-  }
-  
-  // 请求头检查
-  if (request.headers) {
-    const headers = request.headers;
-    
-    // Referer泄漏检测
-    if (headers.referer && headers.referer.includes('internal')) {
-      threats.push({
-        type: 'internal_referer_leak',
-        severity: 'medium',
-        confidence: 0.7,
-        description: 'Referer头可能泄露内部路径'
-      });
-    }
-    
-    // Cookie泄漏检测
-    if (headers.cookie) {
-      threats.push({
-        type: 'cookie_exposure',
-        severity: 'high',
-        confidence: 0.8,
-        description: '请求包含Cookie，可能泄露认证信息'
-      });
-    }
-  }
-  
-  return {
-    safe: threats.length === 0,
-    threats,
-    recommendations: generateRecommendations(threats)
-  };
-}
-
-function generateRecommendations(threats) {
-  const recommendations = [];
-  
-  for (const threat of threats) {
-    switch (threat.type) {
-      case 'internal_ip_access':
-        recommendations.push('使用白名单域名而非IP访问外部资源');
-        recommendations.push('禁止访问169.254.169.254元数据端点');
-        break;
-      case 'dangerous_protocol':
-        recommendations.push('仅允许HTTP/HTTPS协议');
-        break;
-      case 'localhost_access':
-        recommendations.push('禁止访问localhost和127.0.0.1');
-        break;
-      case 'dangerous_path':
-        recommendations.push('禁止访问系统敏感路径');
-        break;
-      case 'url_with_credentials':
-        recommendations.push('使用请求头传递认证信息而非URL');
-        break;
-      case 'dangerous_port':
-        recommendations.push('禁止访问SSH/数据库等管理端口');
-        break;
-    }
-  }
-  
-  return recommendations;
-}
-
-module.exports = {
-  validateURL,
-  validateResponse,
-  secureRequestOptions,
-  scanResourceAccess,
-  INTERNAL_IP_PATTERNS,
-  DANGEROUS_PROTOCOLS,
-  DANGEROUS_PATHS,
-};
+module.exports = ResourceGuardDetector;

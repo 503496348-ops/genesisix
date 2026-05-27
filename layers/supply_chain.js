@@ -15,11 +15,21 @@ class SupplyChainDetector {
   }
 
   _loadRules() {
-    const rulesFile = path.join(this.skillPath, 'rules', 'supply_chain', 'deps.json');
-    if (fs.existsSync(rulesFile)) {
-      const ruleData = JSON.parse(fs.readFileSync(rulesFile, 'utf-8'));
-      this.rules = ruleData;
-    }
+    const rulesDir = path.join(this.skillPath, 'rules', 'supply_chain');
+    const ruleFiles = ['deps.json', 'typosquat.json', 'malicious_import.json', 'skill_integrity.json'];
+    this.allRules = [];
+
+    ruleFiles.forEach(file => {
+      const filePath = path.join(rulesDir, file);
+      if (fs.existsSync(filePath)) {
+        const ruleData = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        this.allRules.push(ruleData);
+        // 兼容旧逻辑：deps.json 仍写入 this.rules
+        if (file === 'deps.json') {
+          this.rules = ruleData;
+        }
+      }
+    });
   }
 
   detect(input) {
@@ -30,25 +40,33 @@ class SupplyChainDetector {
     const threats = [];
     let maxConfidence = 0;
 
-    if (!this.rules.patterns) {
-      return { safe: true, threats: [], confidence: 0 };
-    }
+    // 遍历所有加载的规则集（deps.json + typosquat.json + malicious_import.json）
+    for (const ruleSet of (this.allRules || [this.rules])) {
+      if (!ruleSet || !ruleSet.patterns) continue;
 
-    for (const pattern of this.rules.patterns) {
-      try {
-        const regex = new RegExp(pattern.pattern, 'gi');
-        if (regex.test(input)) {
-          threats.push({
-            type: pattern.category || 'supply_chain',
-            pattern: pattern.id,
-            severity: pattern.severity,
-            confidence: pattern.weight,
-            description: pattern.description
-          });
-          maxConfidence = Math.max(maxConfidence, pattern.weight);
+      for (const pattern of ruleSet.patterns) {
+        try {
+          const { safeRegexTestGlobal } = require('../utils/regex_safety');
+          const result = safeRegexTestGlobal(pattern.pattern, input);
+          if (result.timeout) {
+            threats.push({ type: 'supply_chain', pattern: pattern.id + '-REDoS', severity: 'medium', confidence: 0.5, description: '正则超时跳过: ' + pattern.id });
+            maxConfidence = Math.max(maxConfidence, 0.5);
+            continue;
+          }
+          if (result.error) continue;
+          if (result.matched) {
+            threats.push({
+              type: pattern.category || ruleSet.category || 'supply_chain',
+              pattern: pattern.id,
+              severity: pattern.severity,
+              confidence: pattern.weight,
+              description: pattern.description
+            });
+            maxConfidence = Math.max(maxConfidence, pattern.weight);
+          }
+        } catch (e) {
+          // Skip invalid regex
         }
-      } catch (e) {
-        // Skip invalid regex
       }
     }
 

@@ -1,12 +1,19 @@
 {
-  "name": "@openclaw/clawsafe-hook",
-  "version": "1.0.0",
-  "description": "奇点造物-Genesisix middleware hook for OpenClaw - intercepts and blocks malicious input",
+  "name": "genesisix",
+  "version": "2.0.0",
+  "description": "AI Agent 多层安全检测框架 · 13层防护 + 825条规则",
   "main": "index.js",
   "openclaw": {
-    "hooks": ["./hook"]
+    "hooks": [
+      "./hook"
+    ]
   },
-  "keywords": ["openclaw", "hook", "security", "clawsafe"],
+  "keywords": [
+    "openclaw",
+    "hook",
+    "security",
+    "奇点造物-Genesisix"
+  ],
   "author": "小夏",
   "license": "MIT"
 }

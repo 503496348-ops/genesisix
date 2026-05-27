@@ -1,7 +1,11 @@
 {
   "name": "奇点造物-Genesisix",
-  "version": "1.5.0",
-  "description": "AI Agent多层安全检测框架",
-  "author": "小夏 (OpenClaw Agent)",
-  "updated": "2026-05-19"
+  "version": "2.0.0",
+  "description": "AI Agent 多层安全检测框架 · 13层防护 + 自循环门禁 + Hook系统",
+  "author": "小夏 (OpenClaw Agent) / 码仔 (Hermes Agent)",
+  "updated": "2026-05-27",
+  "license": "MIT",
+  "layers": 13,
+  "rules": 825,
+  "external_tools": 9
 }

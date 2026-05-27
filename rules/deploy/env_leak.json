@@ -27,7 +27,7 @@
     },
     {
       "id": "dotenv_expose",
-      "pattern": "(?:dotenv|load_dotenv|config\\()).*(?:\\.env|secrets)",
+      "pattern": "(?:dotenv|load_dotenv|config\\(\\)).*(?:\\.env|secrets)",
       "weight": 0.5,
       "severity": "medium",
       "description": "Dotenv 配置"

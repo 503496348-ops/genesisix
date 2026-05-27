@@ -18,7 +18,7 @@ class DeployDetector {
     const rulesDir = path.join(this.skillPath, 'rules', 'deploy');
     if (!fs.existsSync(rulesDir)) return;
 
-    const ruleFiles = ['env_leak.json', 'debug_info.json'];
+    const ruleFiles = ['env_leak.json', 'debug_info.json', 'docker_leak.json', 'cicd_leak.json', 'source_leak.json'];
     
     ruleFiles.forEach(file => {
       const filePath = path.join(rulesDir, file);
@@ -43,8 +43,15 @@ class DeployDetector {
 
       for (const pattern of ruleData.patterns) {
         try {
-          const regex = new RegExp(pattern.pattern, 'gi');
-          if (regex.test(input)) {
+          const { safeRegexTestGlobal } = require('../utils/regex_safety');
+          const result = safeRegexTestGlobal(pattern.pattern, input);
+          if (result.timeout) {
+            threats.push({ type: 'deploy', id: pattern.id + '-REDoS', severity: 'medium', description: '正则超时跳过: ' + pattern.id, confidence: 0.5 });
+            maxConfidence = Math.max(maxConfidence, 0.5);
+            continue;
+          }
+          if (result.error) continue;
+          if (result.matched) {
             threats.push({
               type: category,
               pattern: pattern.id,

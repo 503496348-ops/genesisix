@@ -34,9 +34,9 @@
     },
     {
       "id": "ssrf_protocol",
-      "pattern": "^https?://|ftp://|gopher://|dict://",
-      "weight": 0.4,
-      "severity": "medium",
+      "pattern": "(?:gopher|dict|ftp|file|jar|netdoc|ldap)://",
+      "weight": 0.8,
+      "severity": "high",
       "description": "URL 协议检测（通用）"
     }
   ]

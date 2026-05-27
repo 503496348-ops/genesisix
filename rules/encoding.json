@@ -5,13 +5,13 @@
   "patterns": [
     {
       "id": "base64",
-      "pattern": "(?:base64|base-64|b64)\\s*[:=]?\\s*[A-Za-z0-9+/=]{8,}",
-      "weight": 0.7,
-      "severity": "medium"
+      "pattern": "(?:eval|exec|Function|setTimeout|setInterval|atob|btoa|Buffer\\.from|require|import).*\\s*(?:base64|base-64|b64)\\s*[:=]?\\s*[A-Za-z0-9+/=]{8,}",
+      "weight": 0.8,
+      "severity": "high"
     },
     {
       "id": "hex",
-      "pattern": "(?:hex(?:adecimal)?|\\x)\\s*[:=]?\\s*(?:0x)?[0-9a-fA-F]{8,}",
+      "pattern": "(?:hex(?:adecimal)?|\\\\x)\\s*[:=]?\\s*(?:0x)?[0-9a-fA-F]{8,}",
       "weight": 0.6,
       "severity": "medium"
     },
